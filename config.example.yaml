@@ -1,0 +1,66 @@
+# ============================================================
+# fuzzy-waddle – Job Application Automation Config
+# Copy this file to config.yaml and fill in your details.
+# config.yaml is gitignored so your credentials stay private.
+# ============================================================
+
+anthropic:
+  # Set the ANTHROPIC_API_KEY environment variable OR paste key here.
+  api_key: "${ANTHROPIC_API_KEY}"
+  # claude-opus-4-6 for best quality; claude-haiku-4-5 for cheaper runs.
+  model: "claude-opus-4-6"
+  max_tokens: 512
+
+cv:
+  # Absolute or relative path to your CV (PDF or DOCX).
+  path: "./cv/resume.pdf"
+
+search:
+  job_titles:
+    - "Software Engineer"
+    - "Backend Engineer"
+  locations:
+    - "Remote"
+    - "London, UK"
+  keywords:
+    - "Python"
+  exclude_keywords:
+    - "10+ years required"
+  salary_min: 0                   # Skip roles below this (USD). 0 = no filter.
+  max_applications_per_run: 10    # Hard cap per execution.
+  blacklist_companies: []         # Company names to always skip.
+
+platforms:
+  linkedin:
+    enabled: true
+    easy_apply_only: true
+    max_per_run: 10
+  indeed:
+    enabled: true
+    quick_apply_only: true
+    max_per_run: 10
+  glassdoor:
+    enabled: false
+    max_per_run: 5
+  generic_urls:
+    enabled: false
+    urls: []                      # Direct job posting URLs to apply to.
+
+browser:
+  headless: false                 # false = less suspicious; true = unattended.
+  slow_mo_ms: 200                 # Delay between Playwright actions.
+  viewport_width: 1280
+  viewport_height: 900
+
+behavior:
+  min_delay_between_apps_s: 30   # Min seconds to wait between applications.
+  max_delay_between_apps_s: 90   # Max seconds to wait between applications.
+  dry_run: false                  # true = fill forms but never submit.
+  state_file: "./data/applied_jobs.json"
+
+auth:
+  cookie_dir: "./data/cookies"
+
+logging:
+  level: "INFO"
+  log_file: "./data/logs/applications.jsonl"

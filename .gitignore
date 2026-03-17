@@ -1,0 +1,15 @@
+config.yaml
+.env
+cv/
+data/cookies/*.json
+data/logs/*.jsonl
+data/applied_jobs.json
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+dist/
+*.egg-info/
+.playwright/
