@@ -23,11 +23,19 @@ class ValueStrategy(BaseStrategy):
 
     name = "value"
 
-    def __init__(self, min_edge_pct: float = 3.0, resolution_threshold: float = 0.85):
+    def __init__(
+        self,
+        min_edge_pct: float = 3.0,
+        resolution_threshold: float = 0.85,
+        near_certain_cap: float = 0.95,
+    ):
         self.min_edge_pct = min_edge_pct
         # Markets at/above this implied probability (or at/below its mirror) are
         # treated as strong favorites for a resolution play.
         self.resolution_threshold = resolution_threshold
+        # ...but markets at/above this cap (or at/below its mirror) are too close
+        # to certainty — little upside left — so the resolution play skips them.
+        self.near_certain_cap = near_certain_cap
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
         yes_price = market.outcome_prices.get("Yes", 0.5)
@@ -87,12 +95,18 @@ class ValueStrategy(BaseStrategy):
                     )
 
         # Resolution play: implied probability is extreme (a strong favorite)
-        # but not yet near-certain. The analyzer already filters out markets
-        # above 0.95 / below 0.05, so we look for the 0.85–0.95 (and mirrored
-        # 0.05–0.15) band and back the favorite to drift toward resolution.
+        # but not yet near-certain. We look for the 0.85–0.95 band (and its
+        # mirrored 0.05–0.15 band) and back the favorite to drift toward
+        # resolution. The band is enforced directly on the implied probability
+        # here — the analyzer's liquidity filter gates on orderbook ``mid``,
+        # which can diverge from the Gamma ``Yes`` outcome price, so we cannot
+        # rely on it to exclude near-certain markets.
         prob = market.implied_probability
-        lower_extreme = 1.0 - self.resolution_threshold  # e.g. 0.15
-        if prob >= self.resolution_threshold:
+        upper_threshold = self.resolution_threshold  # e.g. 0.85
+        upper_cap = self.near_certain_cap            # e.g. 0.95
+        lower_threshold = 1.0 - self.resolution_threshold  # e.g. 0.15
+        lower_cap = 1.0 - self.near_certain_cap            # e.g. 0.05
+        if upper_threshold <= prob < upper_cap:
             # YES is the strong favorite; remaining gap to certainty is the edge.
             edge = (1.0 - prob) * 100
             if edge >= self.min_edge_pct:
@@ -100,11 +114,11 @@ class ValueStrategy(BaseStrategy):
                     market=market,
                     side="BUY",
                     token_id=market.token_yes,
-                    confidence=min(0.88, 0.6 + (prob - self.resolution_threshold)),
+                    confidence=min(0.88, 0.6 + (prob - upper_threshold)),
                     strategy_name=self.name,
                     reason=f"Resolution play: YES favored at {prob:.3f}, {edge:.1f}% gap to certainty",
                 )
-        elif prob <= lower_extreme:
+        elif lower_cap < prob <= lower_threshold:
             # NO is the strong favorite (YES implied prob is very low).
             edge = prob * 100
             if edge >= self.min_edge_pct:
@@ -112,7 +126,7 @@ class ValueStrategy(BaseStrategy):
                     market=market,
                     side="BUY",
                     token_id=market.token_no,
-                    confidence=min(0.88, 0.6 + (lower_extreme - prob)),
+                    confidence=min(0.88, 0.6 + (lower_threshold - prob)),
                     strategy_name=self.name,
                     reason=f"Resolution play: NO favored (YES at {prob:.3f}), {edge:.1f}% gap to certainty",
                 )
