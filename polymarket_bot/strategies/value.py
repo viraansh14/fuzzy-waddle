@@ -23,8 +23,11 @@ class ValueStrategy(BaseStrategy):
 
     name = "value"
 
-    def __init__(self, min_edge_pct: float = 3.0):
+    def __init__(self, min_edge_pct: float = 3.0, resolution_threshold: float = 0.85):
         self.min_edge_pct = min_edge_pct
+        # Markets at/above this implied probability (or at/below its mirror) are
+        # treated as strong favorites for a resolution play.
+        self.resolution_threshold = resolution_threshold
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
         yes_price = market.outcome_prices.get("Yes", 0.5)
@@ -82,5 +85,36 @@ class ValueStrategy(BaseStrategy):
                         target_price=1.0 - market.ask + 0.01,
                         reason=f"Wide spread value: spread={market.spread:.3f} ({spread_edge:.1f}% edge), buying NO near bid",
                     )
+
+        # Resolution play: implied probability is extreme (a strong favorite)
+        # but not yet near-certain. The analyzer already filters out markets
+        # above 0.95 / below 0.05, so we look for the 0.85–0.95 (and mirrored
+        # 0.05–0.15) band and back the favorite to drift toward resolution.
+        prob = market.implied_probability
+        lower_extreme = 1.0 - self.resolution_threshold  # e.g. 0.15
+        if prob >= self.resolution_threshold:
+            # YES is the strong favorite; remaining gap to certainty is the edge.
+            edge = (1.0 - prob) * 100
+            if edge >= self.min_edge_pct:
+                return Signal(
+                    market=market,
+                    side="BUY",
+                    token_id=market.token_yes,
+                    confidence=min(0.88, 0.6 + (prob - self.resolution_threshold)),
+                    strategy_name=self.name,
+                    reason=f"Resolution play: YES favored at {prob:.3f}, {edge:.1f}% gap to certainty",
+                )
+        elif prob <= lower_extreme:
+            # NO is the strong favorite (YES implied prob is very low).
+            edge = prob * 100
+            if edge >= self.min_edge_pct:
+                return Signal(
+                    market=market,
+                    side="BUY",
+                    token_id=market.token_no,
+                    confidence=min(0.88, 0.6 + (lower_extreme - prob)),
+                    strategy_name=self.name,
+                    reason=f"Resolution play: NO favored (YES at {prob:.3f}), {edge:.1f}% gap to certainty",
+                )
 
         return None
