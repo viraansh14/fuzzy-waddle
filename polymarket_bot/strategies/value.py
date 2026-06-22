@@ -160,14 +160,18 @@ class ValueStrategy(BaseStrategy):
         threshold = self.resolution_threshold
         cap = self.near_certain_cap
 
+        # Collect every side that qualifies. Both can land in the band when the
+        # outcome prices sum well above 1.0, so back the *stronger* favorite
+        # (highest price) rather than whichever happens to be checked first.
+        candidates = []
         if threshold <= yes_price < cap:
-            favorite, token_id = yes_price, market.token_yes
-            side_label = "YES"
-        elif threshold <= no_price < cap:
-            favorite, token_id = no_price, market.token_no
-            side_label = "NO"
-        else:
+            candidates.append((yes_price, market.token_yes, "YES"))
+        if threshold <= no_price < cap:
+            candidates.append((no_price, market.token_no, "NO"))
+        if not candidates:
             return None
+
+        favorite, token_id, side_label = max(candidates, key=lambda c: c[0])
 
         edge = (1.0 - favorite) * 100
         if edge < self.min_edge_pct:
