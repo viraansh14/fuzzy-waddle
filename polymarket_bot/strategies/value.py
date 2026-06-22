@@ -94,41 +94,39 @@ class ValueStrategy(BaseStrategy):
                         reason=f"Wide spread value: spread={market.spread:.3f} ({spread_edge:.1f}% edge), buying NO near bid",
                     )
 
-        # Resolution play: implied probability is extreme (a strong favorite)
-        # but not yet near-certain. We look for the 0.85–0.95 band (and its
-        # mirrored 0.05–0.15 band) and back the favorite to drift toward
-        # resolution. The band is enforced directly on the implied probability
-        # here — the analyzer's liquidity filter gates on orderbook ``mid``,
-        # which can diverge from the Gamma ``Yes`` outcome price, so we cannot
-        # rely on it to exclude near-certain markets.
-        prob = market.implied_probability
-        upper_threshold = self.resolution_threshold  # e.g. 0.85
-        upper_cap = self.near_certain_cap            # e.g. 0.95
-        lower_threshold = 1.0 - self.resolution_threshold  # e.g. 0.15
-        lower_cap = 1.0 - self.near_certain_cap            # e.g. 0.05
-        if upper_threshold <= prob < upper_cap:
+        # Resolution play: a side is a strong favorite (extreme price) but not
+        # yet near-certain. We look for an outcome priced in the 0.85–0.95 band
+        # and back it to drift toward resolution at 1.0. Each side is gated and
+        # sized on its *own* outcome price — YES and NO prices need not sum to
+        # 1.0 — so the edge (gap to certainty) and the near-certainty cap are
+        # always measured against the token actually being bought. The band is
+        # enforced directly on the outcome price rather than the analyzer's
+        # orderbook ``mid``, which can diverge from the Gamma outcome prices.
+        threshold = self.resolution_threshold  # e.g. 0.85
+        cap = self.near_certain_cap            # e.g. 0.95
+        if threshold <= yes_price < cap:
             # YES is the strong favorite; remaining gap to certainty is the edge.
-            edge = (1.0 - prob) * 100
+            edge = (1.0 - yes_price) * 100
             if edge >= self.min_edge_pct:
                 return Signal(
                     market=market,
                     side="BUY",
                     token_id=market.token_yes,
-                    confidence=min(0.88, 0.6 + (prob - upper_threshold)),
+                    confidence=min(0.88, 0.6 + (yes_price - threshold)),
                     strategy_name=self.name,
-                    reason=f"Resolution play: YES favored at {prob:.3f}, {edge:.1f}% gap to certainty",
+                    reason=f"Resolution play: YES favored at {yes_price:.3f}, {edge:.1f}% gap to certainty",
                 )
-        elif lower_cap < prob <= lower_threshold:
-            # NO is the strong favorite (YES implied prob is very low).
-            edge = prob * 100
+        elif threshold <= no_price < cap:
+            # NO is the strong favorite; remaining gap to certainty is the edge.
+            edge = (1.0 - no_price) * 100
             if edge >= self.min_edge_pct:
                 return Signal(
                     market=market,
                     side="BUY",
                     token_id=market.token_no,
-                    confidence=min(0.88, 0.6 + (lower_threshold - prob)),
+                    confidence=min(0.88, 0.6 + (no_price - threshold)),
                     strategy_name=self.name,
-                    reason=f"Resolution play: NO favored (YES at {prob:.3f}), {edge:.1f}% gap to certainty",
+                    reason=f"Resolution play: NO favored at {no_price:.3f}, {edge:.1f}% gap to certainty",
                 )
 
         return None
