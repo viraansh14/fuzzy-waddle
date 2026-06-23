@@ -95,6 +95,16 @@ class RiskManager:
 
     def can_trade(self, signal: Signal) -> tuple[bool, str]:
         """Check if we're allowed to take this trade."""
+        # Capital-preservation circuit breaker: once cumulative realized losses
+        # exceed the configured limit, stop opening new positions. Existing
+        # positions can still be exited (check_exits is independent of this).
+        loss_limit = self.config.max_total_loss_usdc
+        if loss_limit > 0 and self.realized_pnl <= -loss_limit:
+            return False, (
+                f"Loss limit reached (realized P&L ${self.realized_pnl:.2f} "
+                f"<= -${loss_limit:.2f})"
+            )
+
         # Already in this market?
         if signal.token_id in self.positions:
             return False, "Already have position in this token"

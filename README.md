@@ -69,8 +69,10 @@ spread cost before signalling.
 - **Take profit** -- Auto-exit at configurable % gain (default 40%)
 - **Max exposure** -- Total portfolio cap (default $500)
 - **Max positions** -- Concurrent position limit (default 10)
+- **Loss circuit breaker** -- Halts new entries once realized losses reach `MAX_TOTAL_LOSS_USDC` (opt-in)
 - **Stale exit** -- Closes flat positions after 48 hours
 - **State persistence** -- Saves/restores positions across restarts
+- **Startup validation** -- Risk parameters are range-checked before trading begins
 
 ## Setup
 
@@ -117,6 +119,7 @@ All settings are in `.env`:
 | `MAX_POSITIONS` | 10 | Max concurrent positions |
 | `STOP_LOSS_PCT` | 15 | Stop loss trigger (%) |
 | `TAKE_PROFIT_PCT` | 40 | Take profit trigger (%) |
+| `MAX_TOTAL_LOSS_USDC` | 0 | Halt new entries once realized losses reach this (0 = disabled) |
 | `TRADE_LOOP_INTERVAL_SECONDS` | 60 | Seconds between cycles |
 | `MIN_LIQUIDITY_USDC` | 1000 | Min market liquidity to trade |
 | `MIN_VOLUME_USDC` | 5000 | Min market total volume |

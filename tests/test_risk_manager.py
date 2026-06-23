@@ -90,6 +90,28 @@ def test_can_trade_blocks_when_max_exposure_reached():
     assert ok is False
 
 
+def test_can_trade_blocked_when_loss_limit_reached():
+    risk = RiskManager(make_config(max_total_loss_usdc=100.0))
+    risk.realized_pnl = -100.0  # at the limit
+    ok, reason = risk.can_trade(make_signal())
+    assert ok is False
+    assert "Loss limit" in reason
+
+
+def test_can_trade_allowed_within_loss_limit():
+    risk = RiskManager(make_config(max_total_loss_usdc=100.0))
+    risk.realized_pnl = -50.0
+    ok, _ = risk.can_trade(make_signal())
+    assert ok is True
+
+
+def test_loss_limit_disabled_when_zero():
+    risk = RiskManager(make_config(max_total_loss_usdc=0.0))
+    risk.realized_pnl = -1000.0  # huge loss, but breaker disabled
+    ok, _ = risk.can_trade(make_signal())
+    assert ok is True
+
+
 def test_position_size_respects_per_position_cap():
     risk = RiskManager(make_config(max_position_size_usdc=20.0))
     size = risk.calculate_position_size(make_signal(confidence=1.0))
