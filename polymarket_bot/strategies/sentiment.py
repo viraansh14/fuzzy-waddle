@@ -42,6 +42,9 @@ class SentimentStrategy(BaseStrategy):
     """
 
     name = "sentiment"
+    # The no-news-key fallback is driven by price action, so treat sentiment as
+    # a trend-following signal for regime purposes.
+    kind = "trend"
 
     # How long a cached news sentiment score stays fresh. News moves on the
     # order of hours, and NewsAPI calls are rate-limited/expensive, so caching

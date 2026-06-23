@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from .base import BaseStrategy, Signal, extract_prices
+from .base import BaseStrategy, Signal, extract_prices, round_trip_cost_pct
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,11 @@ class MomentumStrategy(BaseStrategy):
     - If short MA crosses above long MA with volume confirmation → BUY YES
     - If short MA crosses below long MA → BUY NO (bet against)
     - Higher confidence when move is sustained and accelerating
+    - The trend must clear the round-trip spread cost to be worth taking.
     """
 
     name = "momentum"
+    kind = "trend"
 
     def __init__(self, short_window: int = 6, long_window: int = 20, min_move_pct: float = 5.0):
         self.short_window = short_window
@@ -45,6 +47,11 @@ class MomentumStrategy(BaseStrategy):
         momentum = (short_ma - long_ma) / long_ma * 100
 
         if abs(momentum) < self.min_move_pct:
+            return None
+
+        # The move has to be worth more than the round-trip spread cost,
+        # otherwise the trade is negative expectancy before it even starts.
+        if abs(momentum) <= round_trip_cost_pct(market):
             return None
 
         # Check if the last 3 prices are accelerating in the SAME direction

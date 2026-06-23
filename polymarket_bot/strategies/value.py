@@ -33,6 +33,7 @@ class ValueStrategy(BaseStrategy):
     """
 
     name = "value"
+    kind = "neutral"
 
     def __init__(
         self,

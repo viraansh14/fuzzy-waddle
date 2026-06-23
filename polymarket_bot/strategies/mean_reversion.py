@@ -23,12 +23,27 @@ class MeanReversionStrategy(BaseStrategy):
     """
 
     name = "mean_reversion"
+    kind = "counter"
 
-    def __init__(self, z_threshold: float = 1.8, lookback: int = 30):
+    def __init__(
+        self,
+        z_threshold: float = 1.8,
+        lookback: int = 30,
+        min_hours_to_resolution: float = 24.0,
+    ):
         self.z_threshold = z_threshold
         self.lookback = lookback
+        # Near resolution an extreme price is usually justified by real
+        # information, so a reversion bet there is dangerous — skip it.
+        self.min_hours_to_resolution = min_hours_to_resolution
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
+        # Honour the long-standing docstring promise: do not fade extremes when
+        # the market is about to resolve.
+        hours = market.hours_to_resolution
+        if hours is not None and 0 <= hours < self.min_hours_to_resolution:
+            return None
+
         prices = extract_prices(market.price_history)
         if len(prices) < self.lookback:
             return None

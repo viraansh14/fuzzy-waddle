@@ -43,6 +43,9 @@ def make_snapshot(
     ask: float = 0.51,
     mid: float = 0.50,
     price_history=None,
+    end_date=None,
+    bid_liquidity: float = 0.0,
+    ask_liquidity: float = 0.0,
 ) -> MarketSnapshot:
     """Construct a MarketSnapshot with overridable fields for strategy tests."""
     return MarketSnapshot(
@@ -60,6 +63,9 @@ def make_snapshot(
         ask=ask,
         mid=mid,
         price_history=price_history if price_history is not None else [],
+        end_date=end_date,
+        bid_liquidity=bid_liquidity,
+        ask_liquidity=ask_liquidity,
     )
 
 

@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .aggregation import aggregate_signals
 from .analyzer import MarketAnalyzer
 from .client import PolymarketClient
 from .config import Config
@@ -16,6 +17,8 @@ from .risk_manager import RiskManager
 from .strategies import (
     MeanReversionStrategy,
     MomentumStrategy,
+    OrderBookImbalanceStrategy,
+    ResolutionDriftStrategy,
     SentimentStrategy,
     ValueStrategy,
     VolumeSpikeStrategy,
@@ -63,6 +66,8 @@ class PolymarketBot:
             VolumeSpikeStrategy(volume_spike_ratio=0.10, min_24h_volume=5000),
             SentimentStrategy(config=self.config),
             MeanReversionStrategy(z_threshold=1.8, lookback=30),
+            OrderBookImbalanceStrategy(min_imbalance=0.30, min_book_liquidity=2000),
+            ResolutionDriftStrategy(max_hours=72.0),
         ]
 
     def run(self):
@@ -138,16 +143,20 @@ class PolymarketBot:
             self._log_portfolio()
             return
 
-        # 5. Rank by confidence, dedupe by market
-        all_signals.sort(key=lambda s: s.confidence, reverse=True)
-        seen_markets = set()
-        top_signals = []
-        for sig in all_signals:
-            if sig.market.condition_id not in seen_markets:
-                top_signals.append(sig)
-                seen_markets.add(sig.market.condition_id)
-            if len(top_signals) >= 5:  # Max 5 new trades per cycle
-                break
+        # 5. Regime-aware aggregation: one signal per market, with trend/counter
+        #    signals filtered by the market's regime and directional conflicts
+        #    resolved. The confidence penalty for conflict can drop a signal
+        #    below threshold, so re-apply the floor afterwards.
+        kind_by_strategy = {s.name: s.kind for s in self.strategies}
+        top_signals = aggregate_signals(
+            all_signals, kind_by_strategy=kind_by_strategy, max_signals=5
+        )
+        top_signals = [s for s in top_signals if s.confidence >= 0.55]
+
+        if not top_signals:
+            logger.info("No signals survived regime aggregation this cycle")
+            self._log_portfolio()
+            return
 
         logger.info("Top signals this cycle:")
         for i, sig in enumerate(top_signals, 1):

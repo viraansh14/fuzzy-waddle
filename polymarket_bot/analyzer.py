@@ -2,6 +2,7 @@
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 from .client import PolymarketClient
@@ -31,6 +32,9 @@ class MarketSnapshot:
     end_date: Optional[str] = None
     description: str = ""
     tags: list[str] = field(default_factory=list)
+    # Resting order liquidity on each side of the YES book (USDC notional).
+    bid_liquidity: float = 0.0
+    ask_liquidity: float = 0.0
 
     @property
     def implied_probability(self) -> float:
@@ -39,6 +43,25 @@ class MarketSnapshot:
     @property
     def is_liquid(self) -> bool:
         return self.liquidity > 500 and self.spread < 0.10
+
+    @property
+    def hours_to_resolution(self) -> Optional[float]:
+        """Hours until the market resolves, or None if the end date is unknown
+        or unparseable. Negative if the end date is already in the past."""
+        if not self.end_date:
+            return None
+        raw = self.end_date.strip()
+        # Python 3.10's fromisoformat does not accept a trailing 'Z'.
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = dt - datetime.now(timezone.utc)
+        return delta.total_seconds() / 3600
 
 
 class MarketAnalyzer:
@@ -105,12 +128,16 @@ class MarketAnalyzer:
         except Exception:
             history = []
 
-        # Get liquidity info
+        # Get liquidity info (total plus per-side resting liquidity)
         try:
             liq_data = self.client.get_book_liquidity(token_yes)
             liquidity = liq_data["total"]
+            bid_liquidity = liq_data.get("bid_liquidity", 0.0)
+            ask_liquidity = liq_data.get("ask_liquidity", 0.0)
         except Exception:
             liquidity = 0
+            bid_liquidity = 0.0
+            ask_liquidity = 0.0
 
         volume_24h = float(raw.get("volume24hr", 0) or raw.get("volume_24hr", 0) or 0)
         total_volume = float(raw.get("volumeNum", 0) or raw.get("volume_num", 0) or 0)
@@ -133,6 +160,8 @@ class MarketAnalyzer:
             end_date=raw.get("endDate") or raw.get("end_date_iso"),
             description=raw.get("description", ""),
             tags=[t.get("label", "") for t in raw.get("tags", [])],
+            bid_liquidity=bid_liquidity,
+            ask_liquidity=ask_liquidity,
         )
 
     def _passes_filters(self, snap: MarketSnapshot) -> bool:
