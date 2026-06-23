@@ -186,7 +186,7 @@ class ExecutionEngine:
             and (now - pos.entry_time) > min_age_seconds
         ]
 
-        cancelled = 0
+        modified = 0
         for token_id, pos in candidates:
             order_id = pos.order_id  # save before we might clear it
             try:
@@ -203,14 +203,21 @@ class ExecutionEngine:
                         pass
 
                 if filled_size is None:
-                    # Fill count is unknown — safer to leave the position in
-                    # place than to silently drop real tokens from the wallet.
+                    # Fill count is unknown. The exchange order is gone, so
+                    # clear order_id to prevent repeated failed retry attempts,
+                    # but leave the position alive in case shares were matched.
+                    pos.order_id = ""
+                    modified += 1
                     logger.warning(
-                        "Cannot determine fill for cancelled order %s; "
-                        "position kept to avoid data loss for %s",
+                        "Fill unknown for cancelled order %s; position kept, "
+                        "order_id cleared to prevent retry for %s",
                         order_id, pos.question[:40],
                     )
                     continue
+
+                # Cap to recorded size: guard against API over-reporting which
+                # would make unfilled_cost negative and corrupt total_invested.
+                filled_size = min(filled_size, pos.size)
 
                 if filled_size > 0:
                     # Partial fill: shrink the position to the filled shares
@@ -233,7 +240,7 @@ class ExecutionEngine:
                         "Cancelled stale limit order %s for %s, phantom position removed",
                         order_id, pos.question[:40],
                     )
-                cancelled += 1
+                modified += 1
             except Exception as e:
                 logger.warning("Failed to cancel stale order %s: %s", order_id, e)
-        return cancelled
+        return modified
