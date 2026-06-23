@@ -198,6 +198,22 @@ def test_confirm_partial_fill_cancels_remainder_and_frees_capital():
     assert client.cancelled_orders == ["ord-1"]  # remainder cancelled
 
 
+def test_confirm_partial_fill_keeps_position_when_cancel_fails():
+    # Cancel of the resting remainder fails -> the order is still live, so the
+    # bot must keep tracking the full position and retry next cycle, not shrink
+    # and stop tracking it.
+    client = FakeClient(order_status={"sizeMatched": 40}, cancel_raises=True)
+    engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
+    count = engine.confirm_filled_limits()
+
+    assert count == 0
+    pos = risk.positions["tok-yes"]
+    assert pos.size == pytest.approx(100.0)  # unchanged
+    assert pos.cost_basis == pytest.approx(50.0)
+    assert pos.order_id == "ord-1"  # still tracked
+    assert risk.total_invested == pytest.approx(50.0)
+
+
 def test_confirm_unfilled_limit_left_untouched():
     client = FakeClient(order_status={"sizeMatched": 0})
     engine, risk = _engine_with_position(client, cost=50.0, size=100.0)

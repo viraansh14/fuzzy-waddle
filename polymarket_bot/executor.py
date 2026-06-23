@@ -214,15 +214,20 @@ class ExecutionEngine:
                     order_id, filled_size, pos.question[:40],
                 )
             else:
-                # Partial fill while still resting: cancel the remainder so no
-                # further untracked fills accrue, then keep only the filled part.
+                # Partial fill while still resting: cancel the remainder first
+                # so no further untracked fills accrue. Only reconcile locally
+                # if the cancel succeeds — otherwise the order is still live and
+                # could keep matching, so we must keep tracking it at full size
+                # and retry the cancel on a later cycle.
                 try:
                     self.client.cancel_order(order_id)
                 except Exception as e:
                     logger.warning(
-                        "Failed to cancel remainder of partially filled order %s: %s",
+                        "Failed to cancel remainder of partially filled order %s; "
+                        "keeping full position to retry next cycle: %s",
                         order_id, e,
                     )
+                    continue
                 filled_cost = pos.entry_price * filled_size
                 unfilled_cost = pos.cost_basis - filled_cost
                 pos.size = filled_size
