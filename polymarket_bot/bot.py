@@ -153,8 +153,12 @@ class PolymarketBot:
 
         logger.info("Executed %d/%d signals", executed, len(top_signals))
 
-        # 6. Cancel any limit orders that haven't filled this cycle
-        self.executor.cancel_stale_orders()
+        # 6. Cancel GTC limit orders that have had at least 2 loop intervals
+        #    to fill. Passing min_age_seconds ensures orders placed in the
+        #    current cycle are never immediately cancelled.
+        self.executor.cancel_stale_orders(
+            min_age_seconds=self.config.trade_loop_interval * 2
+        )
 
         # 7. Log portfolio
         self._log_portfolio()

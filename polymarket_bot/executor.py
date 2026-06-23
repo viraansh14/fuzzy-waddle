@@ -1,6 +1,7 @@
 """Order execution engine - translates signals into actual trades."""
 
 import logging
+import time
 
 from .client import PolymarketClient
 from .config import Config
@@ -139,14 +140,43 @@ class ExecutionEngine:
             logger.error("Exit failed for %s: %s", token_id, e)
             return False
 
-    def cancel_stale_orders(self) -> int:
-        """Cancel any open orders that haven't filled."""
+    def cancel_stale_orders(self, min_age_seconds: float = 120) -> int:
+        """
+        Cancel GTC limit orders that are older than min_age_seconds and
+        have not yet filled, then remove the corresponding phantom position
+        records so reserved capital is freed.
+
+        Only limit orders are eligible (they have a non-empty order_id that
+        isn't the dry-run sentinel). Market orders are FOK and either fill
+        immediately or are rejected, so they never leave open orders on the
+        book. Skipping orders younger than min_age_seconds ensures that
+        limits placed in the current cycle have at least one full sleep
+        interval to fill before being cancelled.
+        """
         if self.config.dry_run:
             return 0
-        try:
-            self.client.cancel_all_orders()
-            logger.info("Cancelled all open orders")
-            return 1
-        except Exception as e:
-            logger.warning("Failed to cancel orders: %s", e)
-            return 0
+
+        now = time.time()
+        candidates = [
+            (token_id, pos)
+            for token_id, pos in list(self.risk.positions.items())
+            if pos.order_id
+            and pos.order_id != "dry-run"
+            and (now - pos.entry_time) > min_age_seconds
+        ]
+
+        cancelled = 0
+        for token_id, pos in candidates:
+            try:
+                self.client.cancel_order(pos.order_id)
+                # The order never filled; record a zero-P&L exit so the
+                # phantom position and its reserved capital are released.
+                self.risk.record_exit(token_id, pos.entry_price, pos.cost_basis)
+                logger.info(
+                    "Cancelled stale limit order %s for %s, phantom position removed",
+                    pos.order_id, pos.question[:40],
+                )
+                cancelled += 1
+            except Exception as e:
+                logger.warning("Failed to cancel stale order %s: %s", pos.order_id, e)
+        return cancelled
