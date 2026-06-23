@@ -123,6 +123,9 @@ class PolymarketClient:
         # we track positions locally. This queries open orders as a proxy.
         return self.clob.get_orders()
 
+    def get_order(self, order_id: str) -> dict:
+        return self.clob.get_order(order_id)
+
     def cancel_order(self, order_id: str) -> dict:
         return self.clob.cancel(order_id)
 

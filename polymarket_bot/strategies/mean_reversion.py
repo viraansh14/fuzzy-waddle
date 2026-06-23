@@ -4,7 +4,7 @@ import logging
 import math
 from typing import Optional
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -23,25 +23,39 @@ class MeanReversionStrategy(BaseStrategy):
     """
 
     name = "mean_reversion"
+    kind = "counter"
 
-    def __init__(self, z_threshold: float = 1.8, lookback: int = 30):
+    def __init__(
+        self,
+        z_threshold: float = 1.8,
+        lookback: int = 30,
+        min_hours_to_resolution: float = 24.0,
+    ):
         self.z_threshold = z_threshold
         self.lookback = lookback
+        # Near resolution an extreme price is usually justified by real
+        # information, so a reversion bet there is dangerous — skip it.
+        self.min_hours_to_resolution = min_hours_to_resolution
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
-        history = market.price_history
-        if len(history) < self.lookback:
+        # Honour the long-standing docstring promise: do not fade extremes when
+        # the market is at or past resolution (negative hours), where an extreme
+        # price is usually justified rather than an overreaction to fade.
+        hours = market.hours_to_resolution
+        if hours is not None and hours < self.min_hours_to_resolution:
             return None
 
-        prices = [float(h.get("p", h.get("price", 0))) for h in history]
-        if not prices:
+        prices = extract_prices(market.price_history)
+        if len(prices) < self.lookback:
             return None
 
         lookback_prices = prices[-self.lookback:]
         current_price = prices[-1]
 
-        mean = sum(lookback_prices) / len(lookback_prices)
-        variance = sum((p - mean) ** 2 for p in lookback_prices) / len(lookback_prices)
+        n = len(lookback_prices)
+        mean = sum(lookback_prices) / n
+        # Sample variance (n-1) for an unbiased estimate of population variance.
+        variance = sum((p - mean) ** 2 for p in lookback_prices) / (n - 1) if n > 1 else 0
         std = math.sqrt(variance) if variance > 0 else 0
 
         if std < 0.01:

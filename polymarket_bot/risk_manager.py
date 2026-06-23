@@ -24,6 +24,11 @@ class Position:
     entry_time: float = field(default_factory=time.time)
     strategy: str = ""
     order_id: str = ""
+    # "limit" for a resting GTC order that may still be cancelled; "market" for
+    # a FOK order that already filled (or a dry-run paper fill). Only "limit"
+    # positions are eligible for stale-order cancellation. Defaults to "market"
+    # so an unknown/legacy position is never wrongly cancelled.
+    order_type: str = "market"
 
     @property
     def age_hours(self) -> float:
@@ -90,6 +95,16 @@ class RiskManager:
 
     def can_trade(self, signal: Signal) -> tuple[bool, str]:
         """Check if we're allowed to take this trade."""
+        # Capital-preservation circuit breaker: once cumulative realized losses
+        # exceed the configured limit, stop opening new positions. Existing
+        # positions can still be exited (check_exits is independent of this).
+        loss_limit = self.config.max_total_loss_usdc
+        if loss_limit > 0 and self.realized_pnl <= -loss_limit:
+            return False, (
+                f"Loss limit reached (realized P&L ${self.realized_pnl:.2f} "
+                f"<= -${loss_limit:.2f})"
+            )
+
         # Already in this market?
         if signal.token_id in self.positions:
             return False, "Already have position in this token"
@@ -118,6 +133,7 @@ class RiskManager:
         size: float,
         cost: float,
         order_id: str = "",
+        order_type: str = "market",
     ) -> Position:
         """Record a new position entry."""
         side = "YES" if signal.token_id == signal.market.token_yes else "NO"
@@ -131,6 +147,7 @@ class RiskManager:
             cost_basis=cost,
             strategy=signal.strategy_name,
             order_id=order_id,
+            order_type=order_type,
         )
         self.positions[signal.token_id] = pos
         self.total_invested += cost
@@ -161,6 +178,22 @@ class RiskManager:
 
     # ── Exit signal checks ──────────────────────────────────────────
 
+    @staticmethod
+    def _is_unconfirmed_limit(pos: Position) -> bool:
+        """A resting GTC limit order recorded optimistically at full size whose
+        fill is not yet confirmed. We may not actually hold these shares, so
+        exit rules (which place market sells) must not run on them until
+        cancel_stale_orders reconciles the position (clearing the order_id on a
+        partial/unknown fill, or removing it entirely on a zero fill).
+
+        Dry-run paper positions use the "dry-run" sentinel order_id and are
+        intentionally exitable so paper trading exercises the exit path."""
+        return (
+            pos.order_type == "limit"
+            and bool(pos.order_id)
+            and pos.order_id != "dry-run"
+        )
+
     def check_exits(self, get_price_fn) -> list[tuple[str, str]]:
         """
         Check all positions for stop-loss or take-profit triggers.
@@ -168,6 +201,11 @@ class RiskManager:
         """
         exits = []
         for token_id, pos in list(self.positions.items()):
+            # Don't try to sell shares we may not hold yet: an unfilled resting
+            # limit is reconciled by cancel_stale_orders, not exited here.
+            if self._is_unconfirmed_limit(pos):
+                continue
+
             try:
                 current_price = get_price_fn(token_id)
             except Exception:

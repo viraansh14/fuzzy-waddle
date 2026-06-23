@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices, round_trip_cost_pct
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,11 @@ class MomentumStrategy(BaseStrategy):
     - If short MA crosses above long MA with volume confirmation → BUY YES
     - If short MA crosses below long MA → BUY NO (bet against)
     - Higher confidence when move is sustained and accelerating
+    - The trend must clear the round-trip spread cost to be worth taking.
     """
 
     name = "momentum"
+    kind = "trend"
 
     def __init__(self, short_window: int = 6, long_window: int = 20, min_move_pct: float = 5.0):
         self.short_window = short_window
@@ -29,12 +31,8 @@ class MomentumStrategy(BaseStrategy):
         self.min_move_pct = min_move_pct
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
-        history = market.price_history
-        if len(history) < self.long_window + 5:
-            return None
-
-        prices = [float(h.get("p", h.get("price", 0))) for h in history]
-        if not prices or len(prices) < self.long_window:
+        prices = extract_prices(market.price_history)
+        if len(prices) < self.long_window + 5:
             return None
 
         recent = prices[-self.short_window:]
@@ -43,22 +41,26 @@ class MomentumStrategy(BaseStrategy):
         short_ma = sum(recent) / len(recent)
         long_ma = sum(medium) / len(medium)
 
-        # Calculate momentum strength
         if long_ma == 0:
             return None
 
         momentum = (short_ma - long_ma) / long_ma * 100
 
-        # Need a meaningful move
         if abs(momentum) < self.min_move_pct:
             return None
 
-        # Check if trend is accelerating (last 3 prices trending same direction)
+        # The move has to be worth more than the round-trip spread cost,
+        # otherwise the trade is negative expectancy before it even starts.
+        if abs(momentum) <= round_trip_cost_pct(market):
+            return None
+
+        # Check if the last 3 prices are accelerating in the SAME direction
+        # as the overall momentum (not just any monotone run).
         last_3 = prices[-3:]
-        accelerating = (
-            (last_3[2] > last_3[1] > last_3[0]) or
-            (last_3[2] < last_3[1] < last_3[0])
-        )
+        if momentum > 0:
+            accelerating = last_3[2] > last_3[1] > last_3[0]
+        else:
+            accelerating = last_3[2] < last_3[1] < last_3[0]
 
         # Calculate rate of change for confidence
         roc = abs(momentum) / 100

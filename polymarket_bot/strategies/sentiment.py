@@ -2,11 +2,12 @@
 
 import logging
 import re
+import time
 from typing import Optional
 
 import requests
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices
 from ..analyzer import MarketSnapshot
 from ..config import Config
 
@@ -42,22 +43,39 @@ class SentimentStrategy(BaseStrategy):
 
     name = "sentiment"
 
+    # How long a cached news sentiment score stays fresh. News moves on the
+    # order of hours, and NewsAPI calls are rate-limited/expensive, so caching
+    # avoids hammering the API every cycle while still letting the score age out.
+    NEWS_CACHE_TTL_SECONDS = 3600
+
     def __init__(self, config: Config):
         self.news_api_key = config.news_api_key
-        self._cache: dict[str, float] = {}
+        # The behavioural kind depends on the signal source: a configured
+        # NewsAPI key makes sentiment news-driven (a structural/"neutral" edge
+        # that should survive in ranging markets), while the keyless fallback is
+        # derived from price action and is therefore trend-following.
+        self.kind = "neutral" if self.news_api_key else "trend"
+        # condition_id -> (score, fetched_at)
+        self._cache: dict[str, tuple[float, float]] = {}
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
         question = market.question
-        cache_key = market.condition_id
 
-        if cache_key in self._cache:
-            sentiment_score = self._cache[cache_key]
-        else:
-            if self.news_api_key:
-                sentiment_score = self._score_from_news(question)
+        if self.news_api_key:
+            # Cache the expensive external news lookup, but expire it so the
+            # score reflects fresh headlines rather than being frozen forever.
+            cache_key = market.condition_id
+            cached = self._cache.get(cache_key)
+            if cached is not None and (time.time() - cached[1]) < self.NEWS_CACHE_TTL_SECONDS:
+                sentiment_score = cached[0]
             else:
-                sentiment_score = self._score_from_question(question, market)
-            self._cache[cache_key] = sentiment_score
+                sentiment_score = self._score_from_news(question)
+                self._cache[cache_key] = (sentiment_score, time.time())
+        else:
+            # The fallback heuristic is derived from current price action and is
+            # cheap to compute, so recompute it every cycle instead of caching a
+            # stale value that can never react to new price moves.
+            sentiment_score = self._score_from_question(question, market)
 
         if abs(sentiment_score) < 0.3:
             return None
@@ -122,9 +140,11 @@ class SentimentStrategy(BaseStrategy):
         """Heuristic sentiment from the market question itself and price action."""
         score = 0.0
 
-        # If price is moving strongly in one direction, that's a sentiment signal
-        if market.price_history and len(market.price_history) >= 10:
-            prices = [float(h.get("p", h.get("price", 0))) for h in market.price_history]
+        # If price is moving strongly in one direction, that's a sentiment signal.
+        # Use extract_prices so missing/zero/NaN history entries don't corrupt
+        # the moving averages (a dropped "p" key would otherwise read as 0.0).
+        prices = extract_prices(market.price_history)
+        if len(prices) >= 10:
             recent = sum(prices[-5:]) / 5
             older = sum(prices[-10:-5]) / 5
             if older > 0:

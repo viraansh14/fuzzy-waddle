@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices, round_trip_cost_pct
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -19,9 +19,11 @@ class VolumeSpikeStrategy(BaseStrategy):
     - High recent volume + price movement = informed trading
     - Volume spike toward YES with price rising → strong BUY YES
     - Volume spike toward NO (YES price dropping) → BUY NO
+    - The move must clear the round-trip spread cost.
     """
 
     name = "volume_spike"
+    kind = "trend"
 
     def __init__(self, volume_spike_ratio: float = 0.10, min_24h_volume: float = 5000):
         self.volume_spike_ratio = volume_spike_ratio
@@ -41,13 +43,20 @@ class VolumeSpikeStrategy(BaseStrategy):
             return None
 
         # Determine direction from price history
-        history = market.price_history
-        if len(history) < 5:
+        prices = extract_prices(market.price_history)
+        if len(prices) < 5:
             return None
 
-        prices = [float(h.get("p", h.get("price", 0))) for h in history]
         recent_avg = sum(prices[-5:]) / 5
-        older_avg = sum(prices[-15:-5]) / 10 if len(prices) >= 15 else sum(prices[:5]) / max(len(prices[:5]), 1)
+
+        # Use the 5 prices immediately before the recent window as the baseline.
+        # `prices[-15:-5]` (up to 10 prices) or whatever non-overlapping
+        # history precedes prices[-5:] — always distinct from the recent window.
+        n = len(prices)
+        older = prices[max(0, n - 10) : n - 5]
+        if not older:
+            return None
+        older_avg = sum(older) / len(older)
 
         if older_avg == 0:
             return None
@@ -56,6 +65,11 @@ class VolumeSpikeStrategy(BaseStrategy):
 
         # Need both volume spike AND price movement
         if abs(price_change) < 0.02:
+            return None
+
+        # The move must clear the round-trip spread cost (price_change is a
+        # fraction; round_trip_cost_pct is a percentage).
+        if abs(price_change) * 100 <= round_trip_cost_pct(market):
             return None
 
         confidence = min(0.90, 0.55 + spike_ratio * 2 + abs(price_change) * 2)

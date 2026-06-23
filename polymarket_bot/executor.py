@@ -1,6 +1,7 @@
 """Order execution engine - translates signals into actual trades."""
 
 import logging
+import time
 
 from .client import PolymarketClient
 from .config import Config
@@ -8,6 +9,22 @@ from .risk_manager import RiskManager
 from .strategies.base import Signal
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_filled_size(order_data: dict) -> float | None:
+    """Return filled share count from a cancel-response or order-status dict.
+
+    Returns None when no recognised fill field is present (caller must treat
+    the fill count as unknown rather than zero).
+    """
+    for key in ("sizeMatched", "size_matched", "matchedAmount", "filled"):
+        val = order_data.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
 
 
 class ExecutionEngine:
@@ -54,6 +71,11 @@ class ExecutionEngine:
             shares, price, size_usdc, signal.reason,
         )
 
+        # A target price means a resting GTC limit order; otherwise it's a FOK
+        # market order that fills (or is killed) immediately. Only limit orders
+        # leave something on the book to cancel later.
+        order_type = "limit" if signal.target_price else "market"
+
         if self.config.dry_run:
             logger.info("[DRY RUN] Would place order — skipping actual execution")
             # Still record the position for paper trading
@@ -63,6 +85,7 @@ class ExecutionEngine:
                 size=shares,
                 cost=size_usdc,
                 order_id="dry-run",
+                order_type=order_type,
             )
             return True
 
@@ -93,6 +116,7 @@ class ExecutionEngine:
                 size=shares,
                 cost=size_usdc,
                 order_id=order_id,
+                order_type=order_type,
             )
             return True
 
@@ -120,16 +144,18 @@ class ExecutionEngine:
             return True
 
         try:
-            # Sell all shares via market order
             current_price = self.client.get_midpoint(token_id)
-            proceeds_est = pos.size * current_price
 
+            # For a SELL market order the CLOB API expects the number of shares
+            # (tokens), not a USDC amount. Passing USDC proceeds would size the
+            # order incorrectly.
             resp = self.client.place_market_order(
                 token_id=token_id,
                 side="SELL",
-                amount=proceeds_est,
+                amount=pos.size,
             )
 
+            proceeds_est = pos.size * current_price
             self.risk.record_exit(token_id, current_price, proceeds_est)
             return True
 
@@ -137,14 +163,173 @@ class ExecutionEngine:
             logger.error("Exit failed for %s: %s", token_id, e)
             return False
 
-    def cancel_stale_orders(self) -> int:
-        """Cancel any open orders that haven't filled."""
+    def confirm_filled_limits(self) -> int:
+        """
+        Reconcile resting GTC limit positions against the exchange so that
+        filled orders become tracked holdings the exit logic can act on.
+
+        For each position still marked as an unconfirmed limit (order_type
+        "limit" with a live, non-dry-run order_id) we query the order status:
+
+        - Fully filled  -> clear order_id so check_exits treats it as a held
+          position (stop-loss / take-profit can now run on real shares).
+        - Partially filled while still resting -> cancel the remainder so no
+          further untracked fills accrue, shrink the position to the filled
+          shares, release the unfilled capital, and clear order_id.
+        - Unfilled or unparseable -> leave it; the age-based cancel_stale_orders
+          handles orders that never fill.
+
+        Returns the number of positions reconciled (for state persistence).
+        """
         if self.config.dry_run:
             return 0
-        try:
-            self.client.cancel_all_orders()
-            logger.info("Cancelled all open orders")
-            return 1
-        except Exception as e:
-            logger.warning("Failed to cancel orders: %s", e)
+
+        confirmed = 0
+        limits = [
+            (token_id, pos)
+            for token_id, pos in list(self.risk.positions.items())
+            if pos.order_type == "limit"
+            and pos.order_id
+            and pos.order_id != "dry-run"
+        ]
+        for token_id, pos in limits:
+            order_id = pos.order_id
+            try:
+                status = self.client.get_order(order_id)
+            except Exception as e:
+                logger.debug("Could not fetch status for order %s: %s", order_id, e)
+                continue
+
+            filled_size = _parse_filled_size(status)
+            if filled_size is None or filled_size <= 0:
+                continue  # not yet filled (or unknown) -> leave for stale cancel
+
+            filled_size = min(filled_size, pos.size)
+            if filled_size >= pos.size:
+                # Fully filled: a genuine holding now. Clearing order_id flips it
+                # out of the "unconfirmed limit" state so exits apply.
+                pos.order_id = ""
+                logger.info(
+                    "Limit order %s fully filled (%.4f shares) for %s",
+                    order_id, filled_size, pos.question[:40],
+                )
+            else:
+                # Partial fill while still resting: cancel the remainder first
+                # so no further untracked fills accrue. Only reconcile locally
+                # if the cancel succeeds — otherwise the order is still live and
+                # could keep matching, so we must keep tracking it at full size
+                # and retry the cancel on a later cycle.
+                try:
+                    self.client.cancel_order(order_id)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to cancel remainder of partially filled order %s; "
+                        "keeping full position to retry next cycle: %s",
+                        order_id, e,
+                    )
+                    continue
+                filled_cost = pos.entry_price * filled_size
+                unfilled_cost = pos.cost_basis - filled_cost
+                pos.size = filled_size
+                pos.cost_basis = filled_cost
+                pos.order_id = ""
+                self.risk.total_invested -= unfilled_cost
+                logger.info(
+                    "Limit order %s partially filled: %.4f shares held, "
+                    "$%.2f unreserved for %s",
+                    order_id, filled_size, unfilled_cost, pos.question[:40],
+                )
+            confirmed += 1
+        return confirmed
+
+    def cancel_stale_orders(self, min_age_seconds: float = 120) -> int:
+        """
+        Cancel GTC limit orders that are older than min_age_seconds and
+        have not yet fully filled, then free the reserved capital.
+
+        Only resting limit orders are eligible: their position is tagged
+        ``order_type == "limit"`` and carries a non-empty, non-dry-run order_id.
+        Market orders are FOK and either fill immediately or are rejected, so
+        their filled positions must never be cancelled (doing so would retry a
+        cancel on an already-filled order every cycle). Skipping orders younger
+        than min_age_seconds ensures that limits placed in the current cycle
+        have at least one full sleep interval to fill before being cancelled.
+
+        Partial fills are handled explicitly: if the API reports that some
+        shares were matched before the cancel, the position is updated to
+        reflect only those shares and the unfilled capital is released.  If
+        fill information is unavailable the position is left untouched rather
+        than silently dropping real tokens.
+        """
+        if self.config.dry_run:
             return 0
+
+        now = time.time()
+        candidates = [
+            (token_id, pos)
+            for token_id, pos in list(self.risk.positions.items())
+            if pos.order_type == "limit"
+            and pos.order_id
+            and pos.order_id != "dry-run"
+            and (now - pos.entry_time) > min_age_seconds
+        ]
+
+        modified = 0
+        for token_id, pos in candidates:
+            order_id = pos.order_id  # save before we might clear it
+            try:
+                cancel_resp = self.client.cancel_order(order_id)
+
+                # The cancel response may include fill info directly; if not,
+                # fall back to a dedicated order-status query.
+                filled_size = _parse_filled_size(cancel_resp)
+                if filled_size is None:
+                    try:
+                        order_status = self.client.get_order(order_id)
+                        filled_size = _parse_filled_size(order_status)
+                    except Exception:
+                        pass
+
+                if filled_size is None:
+                    # Fill count is unknown and the exchange order is now gone.
+                    # A GTC limit that sat unfilled long enough to be stale is
+                    # overwhelmingly likely to have zero fill, so assume that:
+                    # remove the position and free its reserved capital rather
+                    # than locking exposure indefinitely on an order that no
+                    # longer exists.
+                    filled_size = 0.0
+                    logger.warning(
+                        "Fill unknown for cancelled stale order %s; assuming "
+                        "zero fill and releasing capital for %s",
+                        order_id, pos.question[:40],
+                    )
+
+                # Cap to recorded size: guard against API over-reporting which
+                # would make unfilled_cost negative and corrupt total_invested.
+                filled_size = min(filled_size, pos.size)
+
+                if filled_size > 0:
+                    # Partial fill: shrink the position to the filled shares
+                    # and release the capital reserved for the unfilled portion.
+                    filled_cost = pos.entry_price * filled_size
+                    unfilled_cost = pos.cost_basis - filled_cost
+                    pos.size = filled_size
+                    pos.cost_basis = filled_cost
+                    pos.order_id = ""  # prevent re-evaluation next cycle
+                    self.risk.total_invested -= unfilled_cost
+                    logger.info(
+                        "Partial fill on stale order %s: %.4f shares kept, "
+                        "$%.2f unreserved for %s",
+                        order_id, filled_size, unfilled_cost, pos.question[:40],
+                    )
+                else:
+                    # Zero fill: order never executed; release all reserved capital.
+                    self.risk.record_exit(token_id, pos.entry_price, pos.cost_basis)
+                    logger.info(
+                        "Cancelled stale limit order %s for %s, phantom position removed",
+                        order_id, pos.question[:40],
+                    )
+                modified += 1
+            except Exception as e:
+                logger.warning("Failed to cancel stale order %s: %s", order_id, e)
+        return modified

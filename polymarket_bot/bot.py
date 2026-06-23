@@ -8,6 +8,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .aggregation import aggregate_signals
 from .analyzer import MarketAnalyzer
 from .client import PolymarketClient
 from .config import Config
@@ -16,6 +17,8 @@ from .risk_manager import RiskManager
 from .strategies import (
     MeanReversionStrategy,
     MomentumStrategy,
+    OrderBookImbalanceStrategy,
+    ResolutionDriftStrategy,
     SentimentStrategy,
     ValueStrategy,
     VolumeSpikeStrategy,
@@ -63,6 +66,8 @@ class PolymarketBot:
             VolumeSpikeStrategy(volume_spike_ratio=0.10, min_24h_volume=5000),
             SentimentStrategy(config=self.config),
             MeanReversionStrategy(z_threshold=1.8, lookback=30),
+            OrderBookImbalanceStrategy(min_imbalance=0.30, min_book_liquidity=2000),
+            ResolutionDriftStrategy(max_hours=72.0),
         ]
 
     def run(self):
@@ -100,16 +105,32 @@ class PolymarketBot:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         logger.info("─── Cycle #%d at %s ───", self._cycle_count, ts)
 
-        # 1. Check exits on existing positions first
+        # 1. Confirm fills on resting limit orders first, so a filled limit
+        #    becomes a tracked holding before exits are evaluated this cycle.
+        reconciled = self.executor.confirm_filled_limits()
+
+        # 2. Check exits on existing positions (now including just-confirmed fills)
         self._check_exits()
 
-        # 2. Scan markets
+        # 3. Cancel stale GTC limit orders unconditionally so aged phantom
+        #    positions are freed even on cycles where no markets or signals
+        #    are found. Persist immediately if anything changed: the steps
+        #    below (market scan, strategy eval, execution) can raise, and the
+        #    caller swallows the exception, so a deferred save would lose the
+        #    cleanup and let a restart reload phantom positions from disk.
+        stale_modified = self.executor.cancel_stale_orders(
+            min_age_seconds=self.config.trade_loop_interval * 2
+        )
+        if reconciled or stale_modified:
+            self._save_state()
+
+        # 3. Scan markets
         markets = self.analyzer.scan_markets(limit=100)
         if not markets:
             logger.warning("No markets passed filters")
             return
 
-        # 3. Generate signals from all strategies
+        # 4. Generate signals from all strategies
         all_signals: list[Signal] = []
         for market in markets:
             for strategy in self.strategies:
@@ -126,16 +147,20 @@ class PolymarketBot:
             self._log_portfolio()
             return
 
-        # 4. Rank by confidence, dedupe by market
-        all_signals.sort(key=lambda s: s.confidence, reverse=True)
-        seen_markets = set()
-        top_signals = []
-        for sig in all_signals:
-            if sig.market.condition_id not in seen_markets:
-                top_signals.append(sig)
-                seen_markets.add(sig.market.condition_id)
-            if len(top_signals) >= 5:  # Max 5 new trades per cycle
-                break
+        # 5. Regime-aware aggregation: one signal per market, with trend/counter
+        #    signals filtered by the market's regime and directional conflicts
+        #    resolved. The confidence penalty for conflict can drop a signal
+        #    below threshold, so re-apply the floor afterwards.
+        kind_by_strategy = {s.name: s.kind for s in self.strategies}
+        top_signals = aggregate_signals(
+            all_signals, kind_by_strategy=kind_by_strategy, max_signals=5
+        )
+        top_signals = [s for s in top_signals if s.confidence >= 0.55]
+
+        if not top_signals:
+            logger.info("No signals survived regime aggregation this cycle")
+            self._log_portfolio()
+            return
 
         logger.info("Top signals this cycle:")
         for i, sig in enumerate(top_signals, 1):
@@ -145,7 +170,7 @@ class PolymarketBot:
                 sig.side, sig.market.question[:40], sig.reason,
             )
 
-        # 5. Execute top signals
+        # 6. Execute top signals
         executed = 0
         for sig in top_signals:
             if self.executor.execute_signal(sig):
@@ -153,7 +178,7 @@ class PolymarketBot:
 
         logger.info("Executed %d/%d signals", executed, len(top_signals))
 
-        # 6. Log portfolio
+        # 7. Log portfolio
         self._log_portfolio()
         self._save_state()
 
@@ -168,6 +193,11 @@ class PolymarketBot:
         exits = self.risk.check_exits(get_price)
         for token_id, reason in exits:
             self.executor.execute_exit(token_id, reason)
+
+        # Persist immediately after exits so a crash mid-cycle doesn't
+        # replay them on the next restart.
+        if exits:
+            self._save_state()
 
     def _log_portfolio(self):
         """Log current portfolio state."""
@@ -208,6 +238,7 @@ class PolymarketBot:
                     "entry_time": p.entry_time,
                     "strategy": p.strategy,
                     "order_id": p.order_id,
+                    "order_type": p.order_type,
                 }
                 for tid, p in self.risk.positions.items()
             },
@@ -228,6 +259,13 @@ class PolymarketBot:
 
             from .risk_manager import Position
             for tid, pdata in state.get("positions", {}).items():
+                # Migrate state written before order_type was persisted: infer
+                # it from the order_id so legacy resting limits stay eligible
+                # for stale-order cancellation (a real, non-dry-run order_id
+                # means it was placed as a cancellable order).
+                if "order_type" not in pdata:
+                    oid = pdata.get("order_id", "")
+                    pdata["order_type"] = "limit" if oid and oid != "dry-run" else "market"
                 self.risk.positions[tid] = Position(**pdata)
 
             logger.info(
