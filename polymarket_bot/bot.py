@@ -105,10 +105,14 @@ class PolymarketBot:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         logger.info("─── Cycle #%d at %s ───", self._cycle_count, ts)
 
-        # 1. Check exits on existing positions first
+        # 1. Confirm fills on resting limit orders first, so a filled limit
+        #    becomes a tracked holding before exits are evaluated this cycle.
+        reconciled = self.executor.confirm_filled_limits()
+
+        # 2. Check exits on existing positions (now including just-confirmed fills)
         self._check_exits()
 
-        # 2. Cancel stale GTC limit orders unconditionally so aged phantom
+        # 3. Cancel stale GTC limit orders unconditionally so aged phantom
         #    positions are freed even on cycles where no markets or signals
         #    are found. Persist immediately if anything changed: the steps
         #    below (market scan, strategy eval, execution) can raise, and the
@@ -117,7 +121,7 @@ class PolymarketBot:
         stale_modified = self.executor.cancel_stale_orders(
             min_age_seconds=self.config.trade_loop_interval * 2
         )
-        if stale_modified:
+        if reconciled or stale_modified:
             self._save_state()
 
         # 3. Scan markets

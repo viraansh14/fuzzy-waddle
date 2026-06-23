@@ -11,6 +11,21 @@ def _strategy_no_news():
     return SentimentStrategy(cfg)
 
 
+# ── behavioural kind ────────────────────────────────────────────────────
+
+def test_kind_is_trend_without_news_key():
+    # Keyless fallback is price-driven -> trend-following (regime-suppressed in
+    # a range).
+    assert _strategy_no_news().kind == "trend"
+
+
+def test_kind_is_neutral_with_news_key():
+    # News-driven sentiment is structural and must survive in ranging markets.
+    cfg = make_config()
+    cfg.news_api_key = "fake-key"
+    assert SentimentStrategy(cfg).kind == "neutral"
+
+
 # ── keyword scoring ─────────────────────────────────────────────────────
 
 def test_keyword_score_positive():

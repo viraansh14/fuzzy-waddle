@@ -17,9 +17,15 @@ from .conftest import make_config
 
 
 class _FakeExecutor:
-    def __init__(self, stale_modified):
+    def __init__(self, stale_modified, reconciled=0):
         self._stale_modified = stale_modified
+        self._reconciled = reconciled
         self.cancel_calls = 0
+        self.confirm_calls = 0
+
+    def confirm_filled_limits(self):
+        self.confirm_calls += 1
+        return self._reconciled
 
     def cancel_stale_orders(self, min_age_seconds):
         self.cancel_calls += 1
@@ -36,11 +42,11 @@ class _EmptyAnalyzer:
         return []
 
 
-def _make_bot(*, stale_modified, analyzer):
+def _make_bot(*, stale_modified, analyzer, reconciled=0):
     bot = object.__new__(PolymarketBot)
     bot.config = make_config()
     bot.risk = RiskManager(bot.config)
-    bot.executor = _FakeExecutor(stale_modified)
+    bot.executor = _FakeExecutor(stale_modified, reconciled=reconciled)
     bot.analyzer = analyzer
     bot.strategies = []
     bot._running = True
@@ -75,6 +81,16 @@ def test_no_save_when_nothing_stale_and_scan_raises():
 def test_state_persisted_on_no_markets_path():
     bot = _make_bot(stale_modified=1, analyzer=_EmptyAnalyzer())
     bot._cycle()  # returns cleanly on the "no markets" path
+    assert bot._saves == 1
+
+
+def test_reconciled_fill_alone_persists_before_scan_raises():
+    # A confirmed limit fill (no stale cancellation) must also be persisted
+    # before a later step can raise.
+    bot = _make_bot(stale_modified=0, reconciled=1, analyzer=_RaisingAnalyzer())
+    with pytest.raises(RuntimeError):
+        bot._cycle()
+    assert bot.executor.confirm_calls == 1
     assert bot._saves == 1
 
 

@@ -42,9 +42,6 @@ class SentimentStrategy(BaseStrategy):
     """
 
     name = "sentiment"
-    # The no-news-key fallback is driven by price action, so treat sentiment as
-    # a trend-following signal for regime purposes.
-    kind = "trend"
 
     # How long a cached news sentiment score stays fresh. News moves on the
     # order of hours, and NewsAPI calls are rate-limited/expensive, so caching
@@ -53,6 +50,11 @@ class SentimentStrategy(BaseStrategy):
 
     def __init__(self, config: Config):
         self.news_api_key = config.news_api_key
+        # The behavioural kind depends on the signal source: a configured
+        # NewsAPI key makes sentiment news-driven (a structural/"neutral" edge
+        # that should survive in ranging markets), while the keyless fallback is
+        # derived from price action and is therefore trend-following.
+        self.kind = "neutral" if self.news_api_key else "trend"
         # condition_id -> (score, fetched_at)
         self._cache: dict[str, tuple[float, float]] = {}
 

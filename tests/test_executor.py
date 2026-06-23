@@ -144,22 +144,17 @@ def test_filled_size_capped_to_recorded_size():
 
 # ── cancel_stale_orders: unknown fill ───────────────────────────────────
 
-def test_unknown_fill_clears_order_id_but_keeps_position():
-    # Neither cancel response nor get_order yields a parseable fill.
+def test_unknown_fill_assumes_zero_and_frees_capital():
+    # Neither cancel response nor get_order yields a parseable fill. A stale
+    # GTC limit is overwhelmingly likely unfilled, so assume zero fill: remove
+    # the position and release its reserved capital rather than locking it.
     client = FakeClient(cancel_response={}, get_order_raises=True)
     engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
     count = engine.cancel_stale_orders(min_age_seconds=120)
 
     assert count == 1
-    pos = risk.positions["tok-yes"]
-    assert pos.order_id == ""  # cleared -> won't retry the dead order
-    assert pos.size == pytest.approx(100.0)  # shares preserved
-    assert risk.total_invested == pytest.approx(50.0)
-
-    # A second pass must not touch it again (order_id is now empty).
-    client.cancelled_orders.clear()
-    engine.cancel_stale_orders(min_age_seconds=120)
-    assert client.cancelled_orders == []
+    assert "tok-yes" not in risk.positions  # phantom removed
+    assert risk.total_invested == pytest.approx(0.0)  # capital freed
 
 
 def test_cancel_failure_leaves_position_untouched():
@@ -170,6 +165,64 @@ def test_cancel_failure_leaves_position_untouched():
     pos = risk.positions["tok-yes"]
     assert pos.order_id == "ord-1"  # unchanged, can retry later
     assert risk.total_invested == pytest.approx(50.0)
+
+
+# ── confirm_filled_limits ───────────────────────────────────────────────
+
+def test_confirm_fully_filled_limit_clears_order_id():
+    # get_order reports the full size matched -> position becomes a held,
+    # exitable holding (order_id cleared), capital unchanged.
+    client = FakeClient(order_status={"sizeMatched": 100})
+    engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
+    count = engine.confirm_filled_limits()
+
+    assert count == 1
+    pos = risk.positions["tok-yes"]
+    assert pos.order_id == ""
+    assert pos.size == pytest.approx(100.0)
+    assert risk.total_invested == pytest.approx(50.0)
+    assert client.cancelled_orders == []  # a full fill is not cancelled
+
+
+def test_confirm_partial_fill_cancels_remainder_and_frees_capital():
+    client = FakeClient(order_status={"sizeMatched": 40})
+    engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
+    count = engine.confirm_filled_limits()
+
+    assert count == 1
+    pos = risk.positions["tok-yes"]
+    assert pos.size == pytest.approx(40.0)
+    assert pos.cost_basis == pytest.approx(20.0)
+    assert pos.order_id == ""
+    assert risk.total_invested == pytest.approx(20.0)
+    assert client.cancelled_orders == ["ord-1"]  # remainder cancelled
+
+
+def test_confirm_unfilled_limit_left_untouched():
+    client = FakeClient(order_status={"sizeMatched": 0})
+    engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
+    count = engine.confirm_filled_limits()
+
+    assert count == 0
+    pos = risk.positions["tok-yes"]
+    assert pos.order_id == "ord-1"  # still resting, unchanged
+    assert risk.total_invested == pytest.approx(50.0)
+
+
+def test_confirm_ignores_market_positions():
+    client = FakeClient(order_status={"sizeMatched": 100})
+    engine, risk = _engine_with_position(client, order_id="mkt-1", order_type="market")
+    count = engine.confirm_filled_limits()
+    assert count == 0
+    assert client.get_order_calls == []  # market positions aren't queried
+
+
+def test_confirm_status_error_leaves_position():
+    client = FakeClient(get_order_raises=True)
+    engine, risk = _engine_with_position(client, cost=50.0, size=100.0)
+    count = engine.confirm_filled_limits()
+    assert count == 0
+    assert risk.positions["tok-yes"].order_id == "ord-1"
 
 
 # ── execute_exit ────────────────────────────────────────────────────────
