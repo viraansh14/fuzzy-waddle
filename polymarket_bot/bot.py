@@ -105,16 +105,19 @@ class PolymarketBot:
 
         # 2. Cancel stale GTC limit orders unconditionally so aged phantom
         #    positions are freed even on cycles where no markets or signals
-        #    are found (early returns below must not bypass this step).
+        #    are found. Persist immediately if anything changed: the steps
+        #    below (market scan, strategy eval, execution) can raise, and the
+        #    caller swallows the exception, so a deferred save would lose the
+        #    cleanup and let a restart reload phantom positions from disk.
         stale_modified = self.executor.cancel_stale_orders(
             min_age_seconds=self.config.trade_loop_interval * 2
         )
+        if stale_modified:
+            self._save_state()
 
         # 3. Scan markets
         markets = self.analyzer.scan_markets(limit=100)
         if not markets:
-            if stale_modified:
-                self._save_state()
             logger.warning("No markets passed filters")
             return
 
@@ -131,8 +134,6 @@ class PolymarketBot:
                                  strategy.name, market.question[:30], e)
 
         if not all_signals:
-            if stale_modified:
-                self._save_state()
             logger.info("No signals generated this cycle")
             self._log_portfolio()
             return
