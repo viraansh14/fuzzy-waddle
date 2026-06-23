@@ -120,16 +120,18 @@ class ExecutionEngine:
             return True
 
         try:
-            # Sell all shares via market order
             current_price = self.client.get_midpoint(token_id)
-            proceeds_est = pos.size * current_price
 
+            # For a SELL market order the CLOB API expects the number of shares
+            # (tokens), not a USDC amount. Passing USDC proceeds would size the
+            # order incorrectly.
             resp = self.client.place_market_order(
                 token_id=token_id,
                 side="SELL",
-                amount=proceeds_est,
+                amount=pos.size,
             )
 
+            proceeds_est = pos.size * current_price
             self.risk.record_exit(token_id, current_price, proceeds_est)
             return True
 

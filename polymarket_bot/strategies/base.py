@@ -7,6 +7,19 @@ from typing import Optional
 from ..analyzer import MarketSnapshot
 
 
+def extract_prices(history: list[dict]) -> list[float]:
+    """Extract valid (non-zero, finite) prices from a price history list."""
+    prices = []
+    for h in history:
+        try:
+            p = float(h.get("p", h.get("price", 0)))
+        except (TypeError, ValueError):
+            continue
+        if p > 0 and p == p:  # exclude zero and NaN
+            prices.append(p)
+    return prices
+
+
 @dataclass
 class Signal:
     """Trading signal produced by a strategy."""

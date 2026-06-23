@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -29,12 +29,8 @@ class MomentumStrategy(BaseStrategy):
         self.min_move_pct = min_move_pct
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
-        history = market.price_history
-        if len(history) < self.long_window + 5:
-            return None
-
-        prices = [float(h.get("p", h.get("price", 0))) for h in history]
-        if not prices or len(prices) < self.long_window:
+        prices = extract_prices(market.price_history)
+        if len(prices) < self.long_window + 5:
             return None
 
         recent = prices[-self.short_window:]
@@ -43,22 +39,21 @@ class MomentumStrategy(BaseStrategy):
         short_ma = sum(recent) / len(recent)
         long_ma = sum(medium) / len(medium)
 
-        # Calculate momentum strength
         if long_ma == 0:
             return None
 
         momentum = (short_ma - long_ma) / long_ma * 100
 
-        # Need a meaningful move
         if abs(momentum) < self.min_move_pct:
             return None
 
-        # Check if trend is accelerating (last 3 prices trending same direction)
+        # Check if the last 3 prices are accelerating in the SAME direction
+        # as the overall momentum (not just any monotone run).
         last_3 = prices[-3:]
-        accelerating = (
-            (last_3[2] > last_3[1] > last_3[0]) or
-            (last_3[2] < last_3[1] < last_3[0])
-        )
+        if momentum > 0:
+            accelerating = last_3[2] > last_3[1] > last_3[0]
+        else:
+            accelerating = last_3[2] < last_3[1] < last_3[0]
 
         # Calculate rate of change for confidence
         roc = abs(momentum) / 100

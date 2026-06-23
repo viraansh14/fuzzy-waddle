@@ -153,7 +153,10 @@ class PolymarketBot:
 
         logger.info("Executed %d/%d signals", executed, len(top_signals))
 
-        # 6. Log portfolio
+        # 6. Cancel any limit orders that haven't filled this cycle
+        self.executor.cancel_stale_orders()
+
+        # 7. Log portfolio
         self._log_portfolio()
         self._save_state()
 
@@ -168,6 +171,11 @@ class PolymarketBot:
         exits = self.risk.check_exits(get_price)
         for token_id, reason in exits:
             self.executor.execute_exit(token_id, reason)
+
+        # Persist immediately after exits so a crash mid-cycle doesn't
+        # replay them on the next restart.
+        if exits:
+            self._save_state()
 
     def _log_portfolio(self):
         """Log current portfolio state."""

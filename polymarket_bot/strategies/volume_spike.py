@@ -3,7 +3,7 @@
 import logging
 from typing import Optional
 
-from .base import BaseStrategy, Signal
+from .base import BaseStrategy, Signal, extract_prices
 from ..analyzer import MarketSnapshot
 
 logger = logging.getLogger(__name__)
@@ -41,13 +41,20 @@ class VolumeSpikeStrategy(BaseStrategy):
             return None
 
         # Determine direction from price history
-        history = market.price_history
-        if len(history) < 5:
+        prices = extract_prices(market.price_history)
+        if len(prices) < 5:
             return None
 
-        prices = [float(h.get("p", h.get("price", 0))) for h in history]
         recent_avg = sum(prices[-5:]) / 5
-        older_avg = sum(prices[-15:-5]) / 10 if len(prices) >= 15 else sum(prices[:5]) / max(len(prices[:5]), 1)
+
+        # Use the 5 prices immediately before the recent window as the baseline.
+        # `prices[-15:-5]` (up to 10 prices) or whatever non-overlapping
+        # history precedes prices[-5:] — always distinct from the recent window.
+        n = len(prices)
+        older = prices[max(0, n - 10) : n - 5]
+        if not older:
+            return None
+        older_avg = sum(older) / len(older)
 
         if older_avg == 0:
             return None
