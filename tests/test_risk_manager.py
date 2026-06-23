@@ -138,6 +138,48 @@ def test_check_exits_stale_position():
     assert any("STALE" in reason for _t, reason in exits)
 
 
+def test_check_exits_skips_unconfirmed_limit():
+    # A resting limit order recorded at full size, fill not yet confirmed.
+    risk = RiskManager(make_config(stop_loss_pct=15.0))
+    sig = make_signal()
+    risk.record_entry(sig, fill_price=0.50, size=100, cost=50.0,
+                      order_id="ord-1", order_type="limit")
+    # Price would normally trigger a stop loss, but we may not hold the shares.
+    exits = risk.check_exits(lambda _t: 0.40)
+    assert exits == []
+
+
+def test_check_exits_runs_once_limit_reconciled():
+    risk = RiskManager(make_config(stop_loss_pct=15.0))
+    sig = make_signal()
+    risk.record_entry(sig, fill_price=0.50, size=100, cost=50.0,
+                      order_id="ord-1", order_type="limit")
+    # cancel_stale_orders clears order_id on a partial/unknown fill -> now a
+    # genuinely held position that can be exited.
+    risk.positions[sig.token_id].order_id = ""
+    exits = risk.check_exits(lambda _t: 0.40)
+    assert any("STOP LOSS" in reason for _t, reason in exits)
+
+
+def test_check_exits_runs_on_dry_run_limit():
+    # Paper-trading limit positions must still exercise the exit path.
+    risk = RiskManager(make_config(stop_loss_pct=15.0))
+    sig = make_signal()
+    risk.record_entry(sig, fill_price=0.50, size=100, cost=50.0,
+                      order_id="dry-run", order_type="limit")
+    exits = risk.check_exits(lambda _t: 0.40)
+    assert any("STOP LOSS" in reason for _t, reason in exits)
+
+
+def test_check_exits_runs_on_market_position():
+    risk = RiskManager(make_config(stop_loss_pct=15.0))
+    sig = make_signal()
+    risk.record_entry(sig, fill_price=0.50, size=100, cost=50.0,
+                      order_id="mkt-1", order_type="market")
+    exits = risk.check_exits(lambda _t: 0.40)
+    assert any("STOP LOSS" in reason for _t, reason in exits)
+
+
 def test_position_pnl_helpers():
     pos = Position(
         token_id="t", condition_id="c", side="YES", question="q",

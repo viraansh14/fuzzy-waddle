@@ -255,6 +255,13 @@ class PolymarketBot:
 
             from .risk_manager import Position
             for tid, pdata in state.get("positions", {}).items():
+                # Migrate state written before order_type was persisted: infer
+                # it from the order_id so legacy resting limits stay eligible
+                # for stale-order cancellation (a real, non-dry-run order_id
+                # means it was placed as a cancellable order).
+                if "order_type" not in pdata:
+                    oid = pdata.get("order_id", "")
+                    pdata["order_type"] = "limit" if oid and oid != "dry-run" else "market"
                 self.risk.positions[tid] = Position(**pdata)
 
             logger.info(

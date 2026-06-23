@@ -168,6 +168,22 @@ class RiskManager:
 
     # ── Exit signal checks ──────────────────────────────────────────
 
+    @staticmethod
+    def _is_unconfirmed_limit(pos: Position) -> bool:
+        """A resting GTC limit order recorded optimistically at full size whose
+        fill is not yet confirmed. We may not actually hold these shares, so
+        exit rules (which place market sells) must not run on them until
+        cancel_stale_orders reconciles the position (clearing the order_id on a
+        partial/unknown fill, or removing it entirely on a zero fill).
+
+        Dry-run paper positions use the "dry-run" sentinel order_id and are
+        intentionally exitable so paper trading exercises the exit path."""
+        return (
+            pos.order_type == "limit"
+            and bool(pos.order_id)
+            and pos.order_id != "dry-run"
+        )
+
     def check_exits(self, get_price_fn) -> list[tuple[str, str]]:
         """
         Check all positions for stop-loss or take-profit triggers.
@@ -175,6 +191,11 @@ class RiskManager:
         """
         exits = []
         for token_id, pos in list(self.positions.items()):
+            # Don't try to sell shares we may not hold yet: an unfilled resting
+            # limit is reconciled by cancel_stale_orders, not exited here.
+            if self._is_unconfirmed_limit(pos):
+                continue
+
             try:
                 current_price = get_price_fn(token_id)
             except Exception:
