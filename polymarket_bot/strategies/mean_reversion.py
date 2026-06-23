@@ -39,9 +39,10 @@ class MeanReversionStrategy(BaseStrategy):
 
     def evaluate(self, market: MarketSnapshot) -> Optional[Signal]:
         # Honour the long-standing docstring promise: do not fade extremes when
-        # the market is about to resolve.
+        # the market is at or past resolution (negative hours), where an extreme
+        # price is usually justified rather than an overreaction to fade.
         hours = market.hours_to_resolution
-        if hours is not None and 0 <= hours < self.min_hours_to_resolution:
+        if hours is not None and hours < self.min_hours_to_resolution:
             return None
 
         prices = extract_prices(market.price_history)

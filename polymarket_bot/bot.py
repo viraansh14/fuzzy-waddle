@@ -234,6 +234,7 @@ class PolymarketBot:
                     "entry_time": p.entry_time,
                     "strategy": p.strategy,
                     "order_id": p.order_id,
+                    "order_type": p.order_type,
                 }
                 for tid, p in self.risk.positions.items()
             },

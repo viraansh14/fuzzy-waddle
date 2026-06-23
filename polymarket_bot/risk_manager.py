@@ -24,6 +24,11 @@ class Position:
     entry_time: float = field(default_factory=time.time)
     strategy: str = ""
     order_id: str = ""
+    # "limit" for a resting GTC order that may still be cancelled; "market" for
+    # a FOK order that already filled (or a dry-run paper fill). Only "limit"
+    # positions are eligible for stale-order cancellation. Defaults to "market"
+    # so an unknown/legacy position is never wrongly cancelled.
+    order_type: str = "market"
 
     @property
     def age_hours(self) -> float:
@@ -118,6 +123,7 @@ class RiskManager:
         size: float,
         cost: float,
         order_id: str = "",
+        order_type: str = "market",
     ) -> Position:
         """Record a new position entry."""
         side = "YES" if signal.token_id == signal.market.token_yes else "NO"
@@ -131,6 +137,7 @@ class RiskManager:
             cost_basis=cost,
             strategy=signal.strategy_name,
             order_id=order_id,
+            order_type=order_type,
         )
         self.positions[signal.token_id] = pos
         self.total_invested += cost

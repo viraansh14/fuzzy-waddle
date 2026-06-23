@@ -40,14 +40,16 @@ def test_parse_filled_size_unparseable_returns_none():
 
 # ── helpers ─────────────────────────────────────────────────────────────
 
-def _engine_with_position(client, *, order_id="ord-1", age_seconds=300, cost=50.0, size=100.0):
+def _engine_with_position(client, *, order_id="ord-1", age_seconds=300, cost=50.0,
+                          size=100.0, order_type="limit"):
     cfg = make_config()
     risk = RiskManager(cfg)
     engine = ExecutionEngine(client, risk, cfg)
     market = make_snapshot()
     sig = Signal(market=market, side="BUY", token_id="tok-yes",
                  confidence=0.8, strategy_name="value")
-    risk.record_entry(sig, fill_price=0.5, size=size, cost=cost, order_id=order_id)
+    risk.record_entry(sig, fill_price=0.5, size=size, cost=cost,
+                      order_id=order_id, order_type=order_type)
     risk.positions["tok-yes"].entry_time = time.time() - age_seconds
     return engine, risk
 
@@ -67,6 +69,17 @@ def test_dry_run_order_not_cancelled():
     engine, risk = _engine_with_position(client, order_id="dry-run")
     engine.cancel_stale_orders(min_age_seconds=120)
     assert client.cancelled_orders == []
+
+
+def test_market_order_position_not_cancelled():
+    # A filled FOK market entry carries an order_id but must never be retried
+    # for cancellation by cancel_stale_orders.
+    client = FakeClient(cancel_response={"sizeMatched": 0})
+    engine, risk = _engine_with_position(client, order_id="mkt-1", order_type="market")
+    count = engine.cancel_stale_orders(min_age_seconds=120)
+    assert count == 0
+    assert client.cancelled_orders == []
+    assert "tok-yes" in risk.positions  # position preserved
 
 
 def test_dry_run_config_short_circuits():

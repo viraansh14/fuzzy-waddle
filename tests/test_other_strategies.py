@@ -116,6 +116,14 @@ def test_mean_reversion_fires_when_resolution_is_far():
     assert strat.evaluate(market) is not None
 
 
+def test_mean_reversion_skips_past_resolution():
+    # End date already in the past (negative hours) -> still skip.
+    series = [0.50] * 29 + [0.80]
+    market = make_snapshot(price_history=price_series(series), end_date=_iso_in(-5))
+    strat = MeanReversionStrategy(z_threshold=1.8, lookback=30, min_hours_to_resolution=24.0)
+    assert strat.evaluate(market) is None
+
+
 # ── Volume spike ────────────────────────────────────────────────────────
 
 def test_volume_spike_short_history_uses_valid_baseline():

@@ -71,6 +71,11 @@ class ExecutionEngine:
             shares, price, size_usdc, signal.reason,
         )
 
+        # A target price means a resting GTC limit order; otherwise it's a FOK
+        # market order that fills (or is killed) immediately. Only limit orders
+        # leave something on the book to cancel later.
+        order_type = "limit" if signal.target_price else "market"
+
         if self.config.dry_run:
             logger.info("[DRY RUN] Would place order — skipping actual execution")
             # Still record the position for paper trading
@@ -80,6 +85,7 @@ class ExecutionEngine:
                 size=shares,
                 cost=size_usdc,
                 order_id="dry-run",
+                order_type=order_type,
             )
             return True
 
@@ -110,6 +116,7 @@ class ExecutionEngine:
                 size=shares,
                 cost=size_usdc,
                 order_id=order_id,
+                order_type=order_type,
             )
             return True
 
@@ -161,12 +168,13 @@ class ExecutionEngine:
         Cancel GTC limit orders that are older than min_age_seconds and
         have not yet fully filled, then free the reserved capital.
 
-        Only limit orders are eligible (they have a non-empty order_id that
-        isn't the dry-run sentinel). Market orders are FOK and either fill
-        immediately or are rejected, so they never leave open orders on the
-        book. Skipping orders younger than min_age_seconds ensures that
-        limits placed in the current cycle have at least one full sleep
-        interval to fill before being cancelled.
+        Only resting limit orders are eligible: their position is tagged
+        ``order_type == "limit"`` and carries a non-empty, non-dry-run order_id.
+        Market orders are FOK and either fill immediately or are rejected, so
+        their filled positions must never be cancelled (doing so would retry a
+        cancel on an already-filled order every cycle). Skipping orders younger
+        than min_age_seconds ensures that limits placed in the current cycle
+        have at least one full sleep interval to fill before being cancelled.
 
         Partial fills are handled explicitly: if the API reports that some
         shares were matched before the cancel, the position is updated to
@@ -181,7 +189,8 @@ class ExecutionEngine:
         candidates = [
             (token_id, pos)
             for token_id, pos in list(self.risk.positions.items())
-            if pos.order_id
+            if pos.order_type == "limit"
+            and pos.order_id
             and pos.order_id != "dry-run"
             and (now - pos.entry_time) > min_age_seconds
         ]
