@@ -107,6 +107,19 @@ All settings are in `.env`:
 | `DRY_RUN` | true | Paper trading mode |
 | `NEWS_API_KEY` | -- | Optional NewsAPI key for sentiment strategy |
 
+## Testing
+
+The strategy, risk, and execution logic is covered by a fast, network-free
+unit suite (fakes stand in for the Polymarket APIs).
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests run automatically on every pull request via GitHub Actions
+(`.github/workflows/tests.yml`).
+
 ## Disclaimer
 
 This bot is for educational and research purposes. Trading on prediction markets involves risk of loss. Use at your own risk. Ensure you comply with all applicable laws and Polymarket's terms of service in your jurisdiction.
