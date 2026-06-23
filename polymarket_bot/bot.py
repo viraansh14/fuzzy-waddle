@@ -103,13 +103,20 @@ class PolymarketBot:
         # 1. Check exits on existing positions first
         self._check_exits()
 
-        # 2. Scan markets
+        # 2. Cancel stale GTC limit orders unconditionally so aged phantom
+        #    positions are freed even on cycles where no markets or signals
+        #    are found (early returns below must not bypass this step).
+        self.executor.cancel_stale_orders(
+            min_age_seconds=self.config.trade_loop_interval * 2
+        )
+
+        # 3. Scan markets
         markets = self.analyzer.scan_markets(limit=100)
         if not markets:
             logger.warning("No markets passed filters")
             return
 
-        # 3. Generate signals from all strategies
+        # 4. Generate signals from all strategies
         all_signals: list[Signal] = []
         for market in markets:
             for strategy in self.strategies:
@@ -126,7 +133,7 @@ class PolymarketBot:
             self._log_portfolio()
             return
 
-        # 4. Rank by confidence, dedupe by market
+        # 5. Rank by confidence, dedupe by market
         all_signals.sort(key=lambda s: s.confidence, reverse=True)
         seen_markets = set()
         top_signals = []
@@ -145,20 +152,13 @@ class PolymarketBot:
                 sig.side, sig.market.question[:40], sig.reason,
             )
 
-        # 5. Execute top signals
+        # 6. Execute top signals
         executed = 0
         for sig in top_signals:
             if self.executor.execute_signal(sig):
                 executed += 1
 
         logger.info("Executed %d/%d signals", executed, len(top_signals))
-
-        # 6. Cancel GTC limit orders that have had at least 2 loop intervals
-        #    to fill. Passing min_age_seconds ensures orders placed in the
-        #    current cycle are never immediately cancelled.
-        self.executor.cancel_stale_orders(
-            min_age_seconds=self.config.trade_loop_interval * 2
-        )
 
         # 7. Log portfolio
         self._log_portfolio()

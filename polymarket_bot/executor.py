@@ -11,6 +11,22 @@ from .strategies.base import Signal
 logger = logging.getLogger(__name__)
 
 
+def _parse_filled_size(order_data: dict) -> float | None:
+    """Return filled share count from a cancel-response or order-status dict.
+
+    Returns None when no recognised fill field is present (caller must treat
+    the fill count as unknown rather than zero).
+    """
+    for key in ("sizeMatched", "size_matched", "matchedAmount", "filled"):
+        val = order_data.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 class ExecutionEngine:
     """Executes trades from signals, handling order placement and fills."""
 
@@ -143,8 +159,7 @@ class ExecutionEngine:
     def cancel_stale_orders(self, min_age_seconds: float = 120) -> int:
         """
         Cancel GTC limit orders that are older than min_age_seconds and
-        have not yet filled, then remove the corresponding phantom position
-        records so reserved capital is freed.
+        have not yet fully filled, then free the reserved capital.
 
         Only limit orders are eligible (they have a non-empty order_id that
         isn't the dry-run sentinel). Market orders are FOK and either fill
@@ -152,6 +167,12 @@ class ExecutionEngine:
         book. Skipping orders younger than min_age_seconds ensures that
         limits placed in the current cycle have at least one full sleep
         interval to fill before being cancelled.
+
+        Partial fills are handled explicitly: if the API reports that some
+        shares were matched before the cancel, the position is updated to
+        reflect only those shares and the unfilled capital is released.  If
+        fill information is unavailable the position is left untouched rather
+        than silently dropping real tokens.
         """
         if self.config.dry_run:
             return 0
@@ -167,16 +188,52 @@ class ExecutionEngine:
 
         cancelled = 0
         for token_id, pos in candidates:
+            order_id = pos.order_id  # save before we might clear it
             try:
-                self.client.cancel_order(pos.order_id)
-                # The order never filled; record a zero-P&L exit so the
-                # phantom position and its reserved capital are released.
-                self.risk.record_exit(token_id, pos.entry_price, pos.cost_basis)
-                logger.info(
-                    "Cancelled stale limit order %s for %s, phantom position removed",
-                    pos.order_id, pos.question[:40],
-                )
+                cancel_resp = self.client.cancel_order(order_id)
+
+                # The cancel response may include fill info directly; if not,
+                # fall back to a dedicated order-status query.
+                filled_size = _parse_filled_size(cancel_resp)
+                if filled_size is None:
+                    try:
+                        order_status = self.client.get_order(order_id)
+                        filled_size = _parse_filled_size(order_status)
+                    except Exception:
+                        pass
+
+                if filled_size is None:
+                    # Fill count is unknown — safer to leave the position in
+                    # place than to silently drop real tokens from the wallet.
+                    logger.warning(
+                        "Cannot determine fill for cancelled order %s; "
+                        "position kept to avoid data loss for %s",
+                        order_id, pos.question[:40],
+                    )
+                    continue
+
+                if filled_size > 0:
+                    # Partial fill: shrink the position to the filled shares
+                    # and release the capital reserved for the unfilled portion.
+                    filled_cost = pos.entry_price * filled_size
+                    unfilled_cost = pos.cost_basis - filled_cost
+                    pos.size = filled_size
+                    pos.cost_basis = filled_cost
+                    pos.order_id = ""  # prevent re-evaluation next cycle
+                    self.risk.total_invested -= unfilled_cost
+                    logger.info(
+                        "Partial fill on stale order %s: %.4f shares kept, "
+                        "$%.2f unreserved for %s",
+                        order_id, filled_size, unfilled_cost, pos.question[:40],
+                    )
+                else:
+                    # Zero fill: order never executed; release all reserved capital.
+                    self.risk.record_exit(token_id, pos.entry_price, pos.cost_basis)
+                    logger.info(
+                        "Cancelled stale limit order %s for %s, phantom position removed",
+                        order_id, pos.question[:40],
+                    )
                 cancelled += 1
             except Exception as e:
-                logger.warning("Failed to cancel stale order %s: %s", pos.order_id, e)
+                logger.warning("Failed to cancel stale order %s: %s", order_id, e)
         return cancelled
